@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Moeini <a.moeny@gmail.com>
+Date: Wed, 18 Nov 2026 15:20:00 +0330
+Subject: [PATCH] fuse: use fuse_reply_data() in Read() for macFUSE FSKit compatibility
+
+When mounting via macFUSE 5.x with the FSKit backend (-o backend=fskit),
+libfuse3 negotiates FUSE_DARWIN_CAP_REPLY_BUF. Replying with
+fuse_reply_buf() sends the read payload inline over
+MFChannelSendMessage, which fails with EIO for read requests of 128 KiB
+or larger (e.g., Finder copies, cp/fcopyfile, and cat).
+
+Using fuse_reply_data() for non-empty replies routes the payload through
+fuse_reply_data_mfch() / MFMessageGetReplyBuffer on macOS while keeping
+standard libfuse3 behavior on Linux.
+
+Signed-off-by: Moeini <a.moeny@gmail.com>
+---
+ fuse/fuse.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/fuse/fuse.cpp b/fuse/fuse.cpp
+index 08dbcf8..7b1c2d9 100644
+--- a/fuse/fuse.cpp
++++ b/fuse/fuse.cpp
+@@ -603,7 +603,17 @@ namespace
+ 					data = _session->GetPartialObject(objectId, begin, rsize);
+ 			}
+ 			mtp::debug("read ", data.size(), " bytes of data");
+-			FUSE_CALL(fuse_reply_buf(req, static_cast<char *>(static_cast<void *>(data.data())), data.size()));
++			if (data.empty())
++			{
++				FUSE_CALL(fuse_reply_buf(req, nullptr, 0));
++				return;
++			}
++			struct fuse_bufvec bufv = {};
++			bufv.count = 1;
++			bufv.buf[0].size = data.size();
++			bufv.buf[0].mem = data.data();
++			bufv.buf[0].fd = -1;
++			FUSE_CALL(fuse_reply_data(req, &bufv, FUSE_BUF_NO_SPLICE));
+ 		}
+ 
+ 		void Write(fuse_req_t req, FuseId inode, const char *buf, size_t size, off_t off, struct fuse_file_info *fi)
+-- 
+2.45.0

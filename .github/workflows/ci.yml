@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Syntax check shell scripts
+        run: |
+          bash -n bin/android-mount bin/android-unmount install.sh scripts/*.sh tests/*.sh
+
+      - name: Run CLI mount/unmount unit tests
+        run: ./tests/test_unit_mount_scripts.sh
+
+      - name: Install build dependencies and macFUSE
+        run: |
+          brew update
+          brew install cmake pkg-config readline
+          brew install --cask macfuse
+
+      - name: Build aft-mtp-mount & FreeMacDroid.app and verify bundle
+        run: |
+          ./scripts/build-aft.sh
+          ./scripts/build-app.sh
+          ./tests/test_build_bundle.sh
+
+      - name: Package DMG
+        run: ./scripts/package-dmg.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeMacDroid-dmg
+          path: dist/FreeMacDroid.dmg

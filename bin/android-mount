@@ -1,0 +1,163 @@
+#!/bin/bash
+# Mount a USB-connected Android phone (MTP) in Finder via aft-mtp-mount + macFUSE FSKit.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYSBIN="${FREEMACDROID_SYSBIN:-}"
+
+cmd_path() {
+    local name="$1" fallback="$2"
+    if [ -n "$SYSBIN" ] && [ -x "$SYSBIN/$name" ]; then
+        printf '%s\n' "$SYSBIN/$name"
+    else
+        printf '%s\n' "$fallback"
+    fi
+}
+
+MOUNT_CMD="$(cmd_path mount /sbin/mount)"
+GREP_CMD="/usr/bin/grep"
+PGREP_CMD="$(cmd_path pgrep /usr/bin/pgrep)"
+PKILL_CMD="$(cmd_path pkill /usr/bin/pkill)"
+OPEN_CMD="$(cmd_path open /usr/bin/open)"
+DISKUTIL_CMD="$(cmd_path diskutil /usr/sbin/diskutil)"
+UMOUNT_CMD="$(cmd_path umount /sbin/umount)"
+MKDIR_CMD="/bin/mkdir"
+SLEEP_CMD="/bin/sleep"
+TAIL_CMD="/usr/bin/tail"
+
+MNT="${ANDROID_MOUNT_DIR:-$HOME/Android}"
+VOLNAME="${ANDROID_MOUNT_VOLNAME:-Android}"
+LOG="${ANDROID_MOUNT_LOG:-/tmp/aft-mtp-mount.log}"
+OPEN_FINDER=1
+READ_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-open)
+            OPEN_FINDER=0
+            ;;
+        --read-only|--ro)
+            READ_ONLY=1
+            ;;
+        -h|--help)
+            cat <<EOF
+Usage: $(basename "$0") [--no-open] [--read-only]
+
+Mount an Android phone over USB (MTP) into Finder via macFUSE FSKit.
+Environment overrides:
+  AFT_MTP_MOUNT_BIN   Path to aft-mtp-mount binary
+  ANDROID_MOUNT_DIR   Mount point directory (default: \$HOME/Android)
+  ANDROID_MOUNT_VOLNAME Finder volume name (default: Android)
+  ANDROID_MOUNT_LOG   Log file path (default: /tmp/aft-mtp-mount.log)
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+resolve_aft_bin() {
+    if [ -n "${AFT_MTP_MOUNT_BIN:-}" ] && [ -x "$AFT_MTP_MOUNT_BIN" ]; then
+        printf '%s\n' "$AFT_MTP_MOUNT_BIN"
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        "$SCRIPT_DIR/aft-mtp-mount" \
+        "$SCRIPT_DIR/../Helpers/aft-mtp-mount" \
+        "$HOME/.local/bin/aft-mtp-mount" \
+        "/opt/homebrew/bin/aft-mtp-mount" \
+        "/usr/local/bin/aft-mtp-mount"
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+BIN="$(resolve_aft_bin || true)"
+if [ -z "$BIN" ]; then
+    echo "Mount failed: aft-mtp-mount binary not found." >&2
+    exit 1
+fi
+
+OPTS="${ANDROID_MOUNT_OPTS:-backend=fskit,volname=${VOLNAME},local,noappledouble}"
+if [ "$READ_ONLY" -eq 1 ]; then
+    case ",$OPTS," in
+        *,ro,*) ;;
+        *) OPTS="${OPTS},ro" ;;
+    esac
+fi
+
+is_mounted() {
+    "$MOUNT_CMD" | "$GREP_CMD" -Fq " on $MNT ("
+}
+
+open_finder() {
+    if [ "$OPEN_FINDER" -eq 1 ]; then
+        "$OPEN_CMD" "$MNT"
+    fi
+}
+
+fail() {
+    echo "Mount failed: $1" >&2
+    if [ -f "$LOG" ]; then
+        "$TAIL_CMD" -n 15 "$LOG" >&2 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# Already mounted and server alive: just focus Finder.
+if is_mounted && "$PGREP_CMD" -x aft-mtp-mount >/dev/null 2>&1; then
+    open_finder
+    exit 0
+fi
+
+# Clean stale state (phone unplugged or previous server exited).
+if is_mounted; then
+    "$DISKUTIL_CMD" unmount force "$MNT" >/dev/null 2>&1 || "$UMOUNT_CMD" -f "$MNT" >/dev/null 2>&1 || true
+fi
+"$PKILL_CMD" -x aft-mtp-mount 2>/dev/null || true
+
+# Release competing MTP USB claimers. Never kill adb.
+"$PKILL_CMD" -x MacDroid 2>/dev/null || true
+"$PKILL_CMD" -x DroiderLauncher 2>/dev/null || true
+"$PKILL_CMD" -f '[F]reedroid' 2>/dev/null || true
+"$PKILL_CMD" -f '[A]ndroid File Transfer' 2>/dev/null || true
+
+"$MKDIR_CMD" -p "$MNT"
+
+# Up to 4 attempts: macOS ptpcamerad may re-claim the interface on attach.
+for _attempt in 1 2 3 4; do
+    "$PKILL_CMD" -x ptpcamerad 2>/dev/null || true
+    nohup "$BIN" -f -o "$OPTS" "$MNT" >"$LOG" 2>&1 </dev/null &
+    PID=$!
+    disown 2>/dev/null || true
+    for _tick in $(seq 1 20); do
+        if is_mounted; then
+            open_finder
+            exit 0
+        fi
+        kill -0 "$PID" 2>/dev/null || break
+        "$SLEEP_CMD" 0.5
+    done
+    kill "$PID" 2>/dev/null || true
+    "$SLEEP_CMD" 0.5
+done
+
+if "$GREP_CMD" -qi "no MTP device found\|device not found" "$LOG" 2>/dev/null; then
+    fail "phone not detected. Unlock it, select File transfer (MTP) in the USB notification, and check the cable."
+fi
+if "$GREP_CMD" -qi "device may be locked" "$LOG" 2>/dev/null; then
+    fail "phone appears locked. Unlock the phone screen and ensure File transfer (MTP) is selected."
+fi
+if "$GREP_CMD" -qi "File system extension" "$LOG" 2>/dev/null; then
+    fail "macFUSE FSKit extensions are not enabled. Open System Settings > Login Items & Extensions > By Category > File System Extensions and turn ON both macFUSE and macFUSE (local)."
+fi
+fail "mount did not appear. Inspect $LOG for details."

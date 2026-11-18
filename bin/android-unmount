@@ -1,0 +1,30 @@
+#!/bin/bash
+# Cleanly unmount the Android phone from Finder and stop aft-mtp-mount.
+set -uo pipefail
+
+SYSBIN="${FREEMACDROID_SYSBIN:-}"
+
+cmd_path() {
+    local name="$1" fallback="$2"
+    if [ -n "$SYSBIN" ] && [ -x "$SYSBIN/$name" ]; then
+        printf '%s\n' "$SYSBIN/$name"
+    else
+        printf '%s\n' "$fallback"
+    fi
+}
+
+MOUNT_CMD="$(cmd_path mount /sbin/mount)"
+GREP_CMD="/usr/bin/grep"
+DISKUTIL_CMD="$(cmd_path diskutil /usr/sbin/diskutil)"
+UMOUNT_CMD="$(cmd_path umount /sbin/umount)"
+PKILL_CMD="$(cmd_path pkill /usr/bin/pkill)"
+
+MNT="${ANDROID_MOUNT_DIR:-$HOME/Android}"
+
+if "$MOUNT_CMD" | "$GREP_CMD" -Fq " on $MNT ("; then
+    "$DISKUTIL_CMD" unmount "$MNT" 2>/dev/null \
+        || "$DISKUTIL_CMD" unmount force "$MNT" 2>/dev/null \
+        || "$UMOUNT_CMD" -f "$MNT"
+fi
+"$PKILL_CMD" -x aft-mtp-mount 2>/dev/null || true
+exit 0
