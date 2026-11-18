@@ -1,6 +1,6 @@
 cask "freemacdroid" do
   version "0.1.0"
-  sha256 :no_check # Replace with `shasum -a 256 FreeMacDroid.dmg` on release
+  sha256 "0156b25bb5baeaa7cd30f7217fdac9fa92fcd3e2d90e24dc616bc8a3030c1d73"
 
   url "https://github.com/abolfazl-moeini/FreeMacDroid/releases/download/v#{version}/FreeMacDroid.dmg"
   name "FreeMacDroid"
