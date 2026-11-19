@@ -7,8 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let usbMonitor = USBMonitor()
 
     private var isBusy = false
+    private var cachedMounted = false
+    private var cachedHasStaleMount = false
     private let readOnlyKey = "FreeMacDroid.ReadOnly"
     private let autoMountKey = "FreeMacDroid.AutoMount"
+    private let debugModeKey = "FreeMacDroid.DebugMode"
 
     private var readOnlyMode: Bool {
         get { UserDefaults.standard.bool(forKey: readOnlyKey) }
@@ -20,17 +23,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { UserDefaults.standard.set(newValue, forKey: autoMountKey) }
     }
 
+    private var debugMode: Bool {
+        get { UserDefaults.standard.bool(forKey: debugModeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: debugModeKey) }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusBar()
+        refreshMountStatusAsync()
         usbMonitor.onNonAppleUSBConnected = { [weak self] in
             Task { @MainActor in
-                guard let self, self.autoMountMode, !self.isBusy, !MTPService.shared.isCurrentlyMounted() else { return }
+                guard let self, self.autoMountMode, !self.isBusy, !self.cachedMounted else { return }
                 self.performMount(silentErrors: true)
+            }
+        }
+        usbMonitor.onNonAppleUSBDisconnected = { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let status = MTPService.shared.getMountStatus()
+                let mtpConnected = USBMonitor.hasConnectedMTPDevice()
+                if (status.mounted && !mtpConnected) || status.hasStaleMount {
+                    MTPService.shared.unmount { _, _ in
+                        Task { @MainActor in
+                            self?.refreshMountStatusAsync()
+                        }
+                    }
+                } else {
+                    Task { @MainActor in
+                        self?.cachedMounted = status.mounted
+                        self?.cachedHasStaleMount = status.hasStaleMount
+                        self?.rebuildMenu()
+                    }
+                }
             }
         }
         usbMonitor.start()
 
         let check = MTPService.shared.checkEnvironment()
+        cachedMounted = check.isMounted
+        rebuildMenu()
         if !check.macFUSEInstalled || !check.libfuse3Installed || !check.extensionsRegistered {
             openSetupWizard()
         } else {
@@ -65,6 +95,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         populateMenu(menu)
+        refreshMountStatusAsync()
+    }
+
+    private func refreshMountStatusAsync() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let status = MTPService.shared.getMountStatus()
+            Task { @MainActor in
+                guard let self else { return }
+                if self.cachedMounted != status.mounted || self.cachedHasStaleMount != status.hasStaleMount {
+                    self.cachedMounted = status.mounted
+                    self.cachedHasStaleMount = status.hasStaleMount
+                    self.rebuildMenu()
+                }
+            }
+        }
     }
 
     private func rebuildMenu() {
@@ -75,8 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func populateMenu(_ menu: NSMenu) {
         menu.removeAllItems()
-        let mounted = MTPService.shared.isCurrentlyMounted()
-        let hasStaleMount = !mounted && MTPService.shared.hasMountEntry()
+        let mounted = cachedMounted
+        let hasStaleMount = !mounted && cachedHasStaleMount
         let statusTitle: String
         if isBusy {
             statusTitle = "Connecting to Android..."
@@ -117,6 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoItem.state = autoMountMode ? .on : .off
         menu.addItem(autoItem)
 
+        let debugItem = NSMenuItem(title: "Debug Logging", action: #selector(toggleDebugMode), keyEquivalent: "")
+        debugItem.state = debugMode ? .on : .off
+        menu.addItem(debugItem)
+
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Setup & Diagnostics...", action: #selector(openSetupWizard), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "View Mount Log", action: #selector(viewLog), keyEquivalent: "l"))
@@ -136,7 +185,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 self.isBusy = false
+                if ok {
+                    self.cachedMounted = false
+                    self.cachedHasStaleMount = false
+                }
                 self.rebuildMenu()
+                self.refreshMountStatusAsync()
                 if !ok {
                     self.showAlert(title: "Unmount Issue", message: out, showSetupButton: false)
                 }
@@ -151,6 +205,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleAutoMount() {
         autoMountMode.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleDebugMode() {
+        debugMode.toggle()
         rebuildMenu()
     }
 
@@ -176,28 +235,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func performMount(silentErrors: Bool) {
-        let check = MTPService.shared.checkEnvironment()
-        if !check.macFUSEInstalled || !check.libfuse3Installed {
-            if !silentErrors { openSetupWizard() }
-            return
-        }
-        if check.isMounted {
-            MTPService.shared.openMountInFinder()
-            rebuildMenu()
-            return
-        }
         guard !isBusy else { return }
         isBusy = true
         rebuildMenu()
 
-        MTPService.shared.mount(readOnly: readOnlyMode, openFinder: true) { [weak self] result in
+        let readOnly = readOnlyMode
+        let debug = debugMode
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let check = MTPService.shared.checkEnvironment()
             Task { @MainActor in
                 guard let self else { return }
-                self.isBusy = false
-                self.rebuildMenu()
-                self.wizardController?.refresh()
-                if case .failure(let title, let message, let needsSetup) = result, !silentErrors {
-                    self.showAlert(title: title, message: message, showSetupButton: needsSetup)
+                self.cachedMounted = check.isMounted
+                if !check.macFUSEInstalled || !check.libfuse3Installed {
+                    self.isBusy = false
+                    self.rebuildMenu()
+                    if !silentErrors { self.openSetupWizard() }
+                    return
+                }
+                if check.isMounted {
+                    self.isBusy = false
+                    self.cachedHasStaleMount = false
+                    MTPService.shared.openMountInFinder()
+                    self.rebuildMenu()
+                    return
+                }
+
+                MTPService.shared.mount(readOnly: readOnly, debugMode: debug, openFinder: true) { [weak self] result in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.isBusy = false
+                        if case .success = result {
+                            self.cachedMounted = true
+                            self.cachedHasStaleMount = false
+                        }
+                        self.rebuildMenu()
+                        self.refreshMountStatusAsync()
+                        self.wizardController?.refresh()
+                        if case .failure(let title, let message, let needsSetup) = result, !silentErrors {
+                            self.showAlert(title: title, message: message, showSetupButton: needsSetup)
+                        }
+                    }
                 }
             }
         }

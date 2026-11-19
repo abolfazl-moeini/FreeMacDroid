@@ -3,11 +3,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-AFT_COMMIT="${AFT_COMMIT:-e55d502ab9d7f7b631331a31331b6890b487c6de}"
+AFT_COMMIT="${AFT_COMMIT:-0310eb978a8d3e01b7f091b9f3d8bc0cc4ff9206}"
 AFT_REPO="${AFT_REPO:-https://github.com/whoozle/android-file-transfer-linux.git}"
 SRC_DIR="${AFT_SRC_DIR:-$ROOT_DIR/.build/aft-src}"
 PREFIX_DIR="${AFT_PREFIX_DIR:-$ROOT_DIR/.build/aft-prefix}"
-PATCH_FILE="$ROOT_DIR/patches/0001-fuse-use-fuse_reply_data-for-macfuse-fskit.patch"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -44,7 +43,14 @@ fi
 
 git reset --hard "$AFT_COMMIT"
 git clean -fd
-git apply "$PATCH_FILE"
+
+if [ -d "$ROOT_DIR/patches" ]; then
+    for patch_file in "$ROOT_DIR"/patches/*.patch; do
+        [ -f "$patch_file" ] || continue
+        echo "Applying $(basename "$patch_file")..."
+        git apply "$patch_file"
+    done
+fi
 
 READLINE_PREFIX=""
 if command -v brew >/dev/null 2>&1; then

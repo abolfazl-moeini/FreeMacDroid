@@ -3,7 +3,8 @@
 [![Release](https://img.shields.io/github/v/release/abolfazl-moeini/FreeMacDroid?style=flat-square)](https://github.com/abolfazl-moeini/FreeMacDroid/releases/latest)
 [![Platform](https://img.shields.io/badge/macOS-15%2B%20(Apple%20Silicon%20%26%20Intel)-blue?style=flat-square)](https://github.com/abolfazl-moeini/FreeMacDroid/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Upstream PR](https://img.shields.io/badge/Upstream%20Fix-whoozle%2Faft--linux%20%23369-orange?style=flat-square)](https://github.com/whoozle/android-file-transfer-linux/pull/369)
+[![Upstream PR #369](https://img.shields.io/badge/Upstream%20PR%20%23369-Merged-brightgreen?style=flat-square)](https://github.com/whoozle/android-file-transfer-linux/pull/369)
+[![Upstream PRs](https://img.shields.io/badge/Upstream%20PRs-MoveObject%20%26%20Darwin%20USB-blue?style=flat-square)](https://github.com/whoozle/android-file-transfer-linux/pulls)
 
 **Mount any Android phone directly inside macOS Finder over USB — free, open-source, one click, and with USB debugging OFF.**
 
@@ -74,12 +75,33 @@ android-unmount             # Cleanly unmount
 
 ---
 
-## Upstream PR Patch
-The FSKit large-read fix lives cleanly at:
-- [patches/0001-fuse-use-fuse_reply_data-for-macfuse-fskit.patch](patches/0001-fuse-use-fuse_reply_data-for-macfuse-fskit.patch)
-- Upstream PR: [whoozle/android-file-transfer-linux#369](https://github.com/whoozle/android-file-transfer-linux/pull/369)
+## Upstream Contributions & Patches
 
-Tested on macOS (arm64) + macFUSE 5.5.0 with 81.8 MB reads and 20 MB write/remount/read SHA-256 round-trip verification.
+1. **macFUSE FSKit Large Read Fix (PR #369 - Merged):**
+   - Merged upstream in commit [`0310eb97`](https://github.com/whoozle/android-file-transfer-linux/commit/0310eb978a8d3e01b7f091b9f3d8bc0cc4ff9206). Switched large reads from `fuse_reply_buf()` to `fuse_reply_data()` to support FSKit user-space architecture.
+
+2. **Native MTP MoveObject & FUSE Performance ([PR #370](https://github.com/whoozle/android-file-transfer-linux/pull/370) · [`patches/0001-mtp-fuse-native-move-and-perf.patch`](patches/0001-mtp-fuse-native-move-and-perf.patch)):**
+   - Wires up standard MTP `MoveObject` (`0x1019`) inside `Session::MoveObject` and `FuseWrapper::Rename`. Moving files between directories on the phone now happens instantaneously inside the device without copying bytes back and forth over USB (**145x speedup**, e.g., 30 MB move dropped from 13.56s to 0.093s).
+   - In-memory parent inode mapping (`_parentMap`), root storage lookup cache, and 5-second `StatFS` cache to eliminate redundant USB round-trips under macOS FSKit.
+   - Fixed `.` entry in `ReadDir()` returning `Root` instead of the directory's actual inode.
+   - Caches `st_mode` attributes in `Open()` instead of querying USB.
+   - Write buffering (512 KiB) with `ops.flush` and sequential read-ahead (256 KiB).
+   - Safe USB disconnect error handling in `WRAP_EX` and `~ObjectEditSession()` preventing `std::terminate` crashes.
+
+3. **Darwin USB Backend Performance & Timeouts ([PR #371](https://github.com/whoozle/android-file-transfer-linux/pull/371) · [`patches/0002-darwin-usb-bulk-buffer-and-timeouts.patch`](patches/0002-darwin-usb-bulk-buffer-and-timeouts.patch)):**
+   - Upgraded bulk transfer buffer size from 512 bytes (`wMaxPacketSize`) to **256 KiB**, cutting IOKit syscall overhead by 512x.
+   - Implemented `ReadPipeTO` / `WritePipeTO` with proper timeouts and mapped `kIOUSBTransactionTimeout` to `TimeoutException` so an unplugged or locked phone never hangs Finder indefinitely.
+   - Implemented `Device::WriteControl` with `DeviceRequestTO`.
+
+---
+
+## What's New in v0.2.0
+- **Instant In-Phone Move/Cut**: Cut and paste files between folders in Finder instantly without downloading and re-uploading over USB.
+- **512x Fewer USB Syscalls**: 256 KiB bulk USB buffers dramatically improve sustained transfer rates.
+- **Write Buffering & Read-Ahead**: Smooth sequential file operations and immediate error reporting via `flush`.
+- **Automatic Disconnect Recovery**: Menu bar app detects USB cable disconnection (`kIOTerminatedNotification`) and automatically unmounts stale mount points.
+- **Debug Logging Mode**: Added `--debug` CLI option and Menu Bar toggle for instant diagnostics.
+- **macOS Finder Optimization**: Default `noapplexattr` mount option eliminates Apple extended attribute chatter over USB.
 
 ---
 

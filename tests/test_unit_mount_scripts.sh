@@ -107,7 +107,7 @@ fi
 # Test 2: Fresh mount + Finder open + no adb kill
 : > "$CALL_LOG"; rm -f "$STATE_FILE" "$PROC_FILE"
 "$MOUNT_BIN"
-assert_contains "$CALL_LOG" "aft-mtp-mount -f -o backend=fskit,volname=Android,local,noappledouble $MNT_DIR" "mount options"
+assert_contains "$CALL_LOG" "aft-mtp-mount -f -o backend=fskit,volname=Android,local,noappledouble,noapplexattr $MNT_DIR" "mount options"
 assert_contains "$CALL_LOG" "open $MNT_DIR" "open Finder"
 if grep -q "adb" "$CALL_LOG"; then
   echo "FAIL: must never kill adb" >&2; exit 1
@@ -125,7 +125,7 @@ assert_contains "$CALL_LOG" "open $MNT_DIR" "re-open Finder when mounted"
 : > "$CALL_LOG"; touch "$STATE_FILE"; rm -f "$PROC_FILE"
 "$MOUNT_BIN" --no-open --read-only
 assert_contains "$CALL_LOG" "diskutil unmount force $MNT_DIR" "stale unmount"
-assert_contains "$CALL_LOG" "aft-mtp-mount -f -o backend=fskit,volname=Android,local,noappledouble,ro $MNT_DIR" "read-only flag"
+assert_contains "$CALL_LOG" "aft-mtp-mount -f -o backend=fskit,volname=Android,local,noappledouble,noapplexattr,ro $MNT_DIR" "read-only flag"
 if grep -q "open " "$CALL_LOG"; then
   echo "FAIL: --no-open must not invoke open" >&2; exit 1
 fi
@@ -141,5 +141,23 @@ if TEST_MTP_FAIL=locked "$MOUNT_BIN" --no-open 2>"$TMP_ROOT/err.txt"; then
   echo "FAIL: locked phone must return non-zero" >&2; exit 1
 fi
 assert_contains "$TMP_ROOT/err.txt" "locked" "locked phone diagnostic"
+
+# Test 7: Debug mode passes -d to aft-mtp-mount
+: > "$CALL_LOG"; rm -f "$STATE_FILE" "$PROC_FILE"
+"$MOUNT_BIN" --no-open --debug
+assert_contains "$CALL_LOG" "aft-mtp-mount -f -d -o backend=fskit,volname=Android,local,noappledouble,noapplexattr $MNT_DIR" "debug flag"
+
+# Test 8: Symlinked mount point resolves real target in mount & unmount
+SYM_TARGET="$TMP_ROOT/RealAndroid"
+SYM_MNT="$TMP_ROOT/SymlinkAndroid"
+mkdir -p "$SYM_TARGET"
+ln -s "$SYM_TARGET" "$SYM_MNT"
+REAL_SYM_TARGET="$(cd "$SYM_TARGET" && pwd -P)"
+: > "$CALL_LOG"; rm -f "$STATE_FILE" "$PROC_FILE"
+TEST_MNT_DIR="$REAL_SYM_TARGET" ANDROID_MOUNT_DIR="$SYM_MNT" "$MOUNT_BIN" --no-open
+assert_contains "$CALL_LOG" "aft-mtp-mount -f -o backend=fskit,volname=Android,local,noappledouble,noapplexattr $REAL_SYM_TARGET" "symlink mount target"
+: > "$CALL_LOG"
+TEST_MNT_DIR="$REAL_SYM_TARGET" ANDROID_MOUNT_DIR="$SYM_MNT" "$UNMOUNT_BIN"
+assert_contains "$CALL_LOG" "diskutil unmount $REAL_SYM_TARGET" "symlink unmount target"
 
 echo "PASS [GREEN]: All unit tests for bin/android-mount and bin/android-unmount passed"

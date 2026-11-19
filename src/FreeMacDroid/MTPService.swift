@@ -59,15 +59,25 @@ final class MTPService: @unchecked Sendable {
         )
     }
 
+    func resolvedMountPoint() -> String {
+        return URL(fileURLWithPath: mountPoint).resolvingSymlinksInPath().path
+    }
+
     func hasMountEntry() -> Bool {
         let out = runSync("/sbin/mount", args: []).output
-        return out.contains(" on \(mountPoint) (")
+        let resolved = resolvedMountPoint()
+        return out.contains(" on \(mountPoint) (") || out.contains(" on \(resolved) (")
+    }
+
+    func getMountStatus() -> (mounted: Bool, hasStaleMount: Bool) {
+        guard hasMountEntry() else { return (false, false) }
+        let proc = runSync("/usr/bin/pgrep", args: ["-x", "aft-mtp-mount"])
+        let alive = (proc.exitCode == 0)
+        return (alive, !alive)
     }
 
     func isCurrentlyMounted() -> Bool {
-        guard hasMountEntry() else { return false }
-        let proc = runSync("/usr/bin/pgrep", args: ["-x", "aft-mtp-mount"])
-        return proc.exitCode == 0
+        return getMountStatus().mounted
     }
 
     func registerFSKitExtensions() -> (ok: Bool, output: String) {
@@ -97,12 +107,13 @@ final class MTPService: @unchecked Sendable {
         return parts.suffix(lines).joined(separator: "\n")
     }
 
-    func mount(readOnly: Bool, openFinder: Bool = true, completion: @escaping @Sendable (MountResult) -> Void) {
+    func mount(readOnly: Bool, debugMode: Bool = false, openFinder: Bool = true, completion: @escaping @Sendable (MountResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let script = self.helperPath("android-mount")
             var args: [String] = []
             if !openFinder { args.append("--no-open") }
             if readOnly { args.append("--read-only") }
+            if debugMode { args.append("--debug") }
 
             var env = ProcessInfo.processInfo.environment
             env["ANDROID_MOUNT_DIR"] = self.mountPoint

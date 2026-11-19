@@ -30,6 +30,7 @@ VOLNAME="${ANDROID_MOUNT_VOLNAME:-Android}"
 LOG="${ANDROID_MOUNT_LOG:-/tmp/aft-mtp-mount.log}"
 OPEN_FINDER=1
 READ_ONLY=0
+DEBUG=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,9 +40,12 @@ while [ $# -gt 0 ]; do
         --read-only|--ro)
             READ_ONLY=1
             ;;
+        --debug|-d)
+            DEBUG=1
+            ;;
         -h|--help)
             cat <<EOF
-Usage: $(basename "$0") [--no-open] [--read-only]
+Usage: $(basename "$0") [--no-open] [--read-only] [--debug]
 
 Mount an Android phone over USB (MTP) into Finder via macFUSE FSKit.
 Environment overrides:
@@ -49,6 +53,7 @@ Environment overrides:
   ANDROID_MOUNT_DIR   Mount point directory (default: \$HOME/Android)
   ANDROID_MOUNT_VOLNAME Finder volume name (default: Android)
   ANDROID_MOUNT_LOG   Log file path (default: /tmp/aft-mtp-mount.log)
+  ANDROID_MOUNT_DEBUG Enable verbose MTP debug logging (1=yes)
 EOF
             exit 0
             ;;
@@ -60,6 +65,10 @@ EOF
     shift
 done
 
+if [ "${ANDROID_MOUNT_DEBUG:-0}" = "1" ]; then
+    DEBUG=1
+fi
+
 resolve_aft_bin() {
     if [ -n "${AFT_MTP_MOUNT_BIN:-}" ] && [ -x "$AFT_MTP_MOUNT_BIN" ]; then
         printf '%s\n' "$AFT_MTP_MOUNT_BIN"
@@ -69,6 +78,7 @@ resolve_aft_bin() {
     for candidate in \
         "$SCRIPT_DIR/aft-mtp-mount" \
         "$SCRIPT_DIR/../Helpers/aft-mtp-mount" \
+        "$SCRIPT_DIR/../.build/aft-prefix/bin/aft-mtp-mount" \
         "$HOME/.local/bin/aft-mtp-mount" \
         "/opt/homebrew/bin/aft-mtp-mount" \
         "/usr/local/bin/aft-mtp-mount"
@@ -87,7 +97,7 @@ if [ -z "$BIN" ]; then
     exit 1
 fi
 
-OPTS="${ANDROID_MOUNT_OPTS:-backend=fskit,volname=${VOLNAME},local,noappledouble}"
+OPTS="${ANDROID_MOUNT_OPTS:-backend=fskit,volname=${VOLNAME},local,noappledouble,noapplexattr}"
 if [ "$READ_ONLY" -eq 1 ]; then
     case ",$OPTS," in
         *,ro,*) ;;
@@ -95,8 +105,23 @@ if [ "$READ_ONLY" -eq 1 ]; then
     esac
 fi
 
+REAL_MNT="$MNT"
+MOUNT_ARG="$MNT"
+if [ -L "$MNT" ]; then
+    _link_target="$(/usr/bin/readlink "$MNT" 2>/dev/null || true)"
+    [ -n "$_link_target" ] && "$MKDIR_CMD" -p "$_link_target"
+    REAL_MNT="$(cd "$MNT" 2>/dev/null && pwd -P || printf '%s\n' "${_link_target:-$MNT}")"
+    MOUNT_ARG="$REAL_MNT"
+elif [ -d "$MNT" ]; then
+    REAL_MNT="$(cd "$MNT" 2>/dev/null && pwd -P || printf '%s\n' "$MNT")"
+fi
+
 is_mounted() {
-    "$MOUNT_CMD" | "$GREP_CMD" -Fq " on $MNT ("
+    "$MOUNT_CMD" | "$GREP_CMD" -Fq " on $MNT (" && return 0
+    if [ -n "${REAL_MNT:-}" ] && [ "$REAL_MNT" != "$MNT" ]; then
+        "$MOUNT_CMD" | "$GREP_CMD" -Fq " on $REAL_MNT (" && return 0
+    fi
+    return 1
 }
 
 open_finder() {
@@ -121,7 +146,11 @@ fi
 
 # Clean stale state (phone unplugged or previous server exited).
 if is_mounted; then
-    "$DISKUTIL_CMD" unmount force "$MNT" >/dev/null 2>&1 || "$UMOUNT_CMD" -f "$MNT" >/dev/null 2>&1 || true
+    for _target in "$MNT" "$REAL_MNT"; do
+        if "$MOUNT_CMD" | "$GREP_CMD" -Fq " on $_target ("; then
+            "$DISKUTIL_CMD" unmount force "$_target" >/dev/null 2>&1 || "$UMOUNT_CMD" -f "$_target" >/dev/null 2>&1 || true
+        fi
+    done
 fi
 "$PKILL_CMD" -x aft-mtp-mount 2>/dev/null || true
 
@@ -131,12 +160,23 @@ fi
 "$PKILL_CMD" -f '[F]reedroid' 2>/dev/null || true
 "$PKILL_CMD" -f '[A]ndroid File Transfer' 2>/dev/null || true
 
-"$MKDIR_CMD" -p "$MNT"
+if [ -L "$MNT" ]; then
+    "$MKDIR_CMD" -p "$REAL_MNT"
+    MOUNT_ARG="$REAL_MNT"
+else
+    "$MKDIR_CMD" -p "$MNT"
+    REAL_MNT="$(cd "$MNT" 2>/dev/null && pwd -P || printf '%s\n' "$MNT")"
+    MOUNT_ARG="$MNT"
+fi
 
 # Up to 4 attempts: macOS ptpcamerad may re-claim the interface on attach.
 for _attempt in 1 2 3 4; do
     "$PKILL_CMD" -x ptpcamerad 2>/dev/null || true
-    nohup "$BIN" -f -o "$OPTS" "$MNT" >"$LOG" 2>&1 </dev/null &
+    if [ "$DEBUG" -eq 1 ]; then
+        nohup "$BIN" -f -d -o "$OPTS" "$MOUNT_ARG" >"$LOG" 2>&1 </dev/null &
+    else
+        nohup "$BIN" -f -o "$OPTS" "$MOUNT_ARG" >"$LOG" 2>&1 </dev/null &
+    fi
     PID=$!
     disown 2>/dev/null || true
     for _tick in $(seq 1 20); do
@@ -149,6 +189,18 @@ for _attempt in 1 2 3 4; do
     done
     kill "$PID" 2>/dev/null || true
     "$SLEEP_CMD" 0.5
+    # If aft-mtp-mount connected to the phone but FSKit rejected the mount directory path (e.g. Code 516), rotate backing dir
+    if [ -z "$SYSBIN" ] \
+        && "$GREP_CMD" -qi "connected:\|device supports\|FUSE library" "$LOG" 2>/dev/null \
+        && ! "$GREP_CMD" -qi "File system extension" "$LOG" 2>/dev/null; then
+        FALLBACK_MNT="$HOME/.freemacdroid/Android-$$-${_attempt}"
+        "$MKDIR_CMD" -p "$FALLBACK_MNT"
+        if [ -L "$MNT" ] || rmdir "$MNT" 2>/dev/null; then
+            /bin/ln -sfn "$FALLBACK_MNT" "$MNT"
+            REAL_MNT="$(cd "$FALLBACK_MNT" 2>/dev/null && pwd -P || printf '%s\n' "$FALLBACK_MNT")"
+            MOUNT_ARG="$REAL_MNT"
+        fi
+    fi
 done
 
 if "$GREP_CMD" -qi "no MTP device found\|device not found" "$LOG" 2>/dev/null; then

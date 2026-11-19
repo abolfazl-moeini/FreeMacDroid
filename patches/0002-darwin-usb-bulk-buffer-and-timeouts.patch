@@ -1,0 +1,275 @@
+diff --git a/mtp/backend/darwin/usb/Device.cpp b/mtp/backend/darwin/usb/Device.cpp
+index 58a3883..7e1876e 100644
+--- a/mtp/backend/darwin/usb/Device.cpp
++++ b/mtp/backend/darwin/usb/Device.cpp
+@@ -46,35 +46,54 @@ namespace mtp { namespace usb
+ 
+ 	void Device::ClearHalt(const EndpointPtr & ep)
+ 	{
+-		IOUSBInterfaceInterface	** interface = ep->GetInterfaceHandle();
++		IOUSBInterfaceType	** interface = ep->GetInterfaceHandle();
+ 		USB_CALL((*interface)->ClearPipeStall(interface, ep->GetRefIndex()));
+ 	}
+ 
+ 	void Device::WriteBulk(const EndpointPtr & ep, const IObjectInputStreamPtr &inputStream, int timeout)
+ 	{
+-		IOUSBInterfaceInterface	** interface = ep->GetInterfaceHandle();
++		IOUSBInterfaceType	** interface = ep->GetInterfaceHandle();
+ 
+-		size_t transferSize = ep->GetMaxPacketSize();
++		static constexpr size_t MaxBulkTransferSize = 256 * 1024;
++		size_t maxPacket = ep->GetMaxPacketSize();
++		if (maxPacket == 0)
++			maxPacket = 512;
++		size_t transferSize = std::max(maxPacket, (MaxBulkTransferSize / maxPacket) * maxPacket);
+ 		ByteArray buffer(transferSize);
+ 		size_t r;
++		UInt32 noDataTimeout = timeout > 0 ? timeout : 0;
++		UInt32 completionTimeout = timeout > 0 ? std::max(timeout, 30000) : 0;
++
+ 		do
+ 		{
+ 			r = inputStream->Read(buffer.data(), buffer.size());
+-			USB_CALL((*interface)->WritePipe(interface, ep->GetRefIndex(), buffer.data(), r));
++			USB_CALL((*interface)->WritePipeTO(interface, ep->GetRefIndex(), buffer.data(), static_cast<UInt32>(r), noDataTimeout, completionTimeout));
+ 		}
+ 		while(r == transferSize);
++
++		if (r > 0 && (r % maxPacket == 0))
++		{
++			USB_CALL((*interface)->WritePipeTO(interface, ep->GetRefIndex(), buffer.data(), 0, noDataTimeout, completionTimeout));
++		}
+ 	}
+ 
+ 	void Device::ReadBulk(const EndpointPtr & ep, const IObjectOutputStreamPtr &outputStream, int timeout)
+ 	{
+-		IOUSBInterfaceInterface	** interface = ep->GetInterfaceHandle();
+-		size_t transferSize = ep->GetMaxPacketSize();
++		IOUSBInterfaceType	** interface = ep->GetInterfaceHandle();
++		static constexpr size_t MaxBulkTransferSize = 256 * 1024;
++		size_t maxPacket = ep->GetMaxPacketSize();
++		if (maxPacket == 0)
++			maxPacket = 512;
++		size_t transferSize = std::max(maxPacket, (MaxBulkTransferSize / maxPacket) * maxPacket);
+ 		ByteArray buffer(transferSize);
+ 		size_t r;
++		UInt32 noDataTimeout = timeout > 0 ? timeout : 0;
++		UInt32 completionTimeout = timeout > 0 ? std::max(timeout, 30000) : 0;
++
+ 		do
+ 		{
+-			UInt32 readBytes = buffer.size();
+-			USB_CALL((*interface)->ReadPipe(interface, ep->GetRefIndex(), buffer.data(), &readBytes));
++			UInt32 readBytes = static_cast<UInt32>(buffer.size());
++			USB_CALL((*interface)->ReadPipeTO(interface, ep->GetRefIndex(), buffer.data(), &readBytes, noDataTimeout, completionTimeout));
+ 			r = outputStream->Write(buffer.data(), readBytes);
+ 		}
+ 		while(r == transferSize);
+@@ -82,14 +101,19 @@ namespace mtp { namespace usb
+ 
+ 	void Device::ReadControl(IOUSBDeviceType **dev, u8 type, u8 req, u16 value, u16 index, ByteArray &data, int timeout)
+ 	{
+-		IOUSBDevRequest request = {};
++		UInt32 noDataTimeout = timeout > 0 ? timeout : 0;
++		UInt32 completionTimeout = timeout > 0 ? std::max(timeout, 30000) : 0;
++
++		IOUSBDevRequestTO request = {};
+ 		request.bmRequestType = type;
+ 		request.bRequest = req;
+ 		request.wValue = value;
+ 		request.wIndex = index;
+ 		request.pData = data.data();
+-		request.wLength = data.size();
+-		USB_CALL((*dev)->DeviceRequest(dev, &request));
++		request.wLength = static_cast<UInt16>(data.size());
++		request.noDataTimeout = noDataTimeout;
++		request.completionTimeout = completionTimeout;
++		USB_CALL((*dev)->DeviceRequestTO(dev, &request));
+ 		data.resize(request.wLenDone);
+ 	}
+ 
+@@ -97,7 +121,21 @@ namespace mtp { namespace usb
+ 	{ ReadControl(_dev, type, req, value, index, data, timeout); }
+ 
+ 	void Device::WriteControl(u8 type, u8 req, u16 value, u16 index, const ByteArray &data, int timeout)
+-	{ error("WriteControl stub"); }
++	{
++		UInt32 noDataTimeout = timeout > 0 ? timeout : 0;
++		UInt32 completionTimeout = timeout > 0 ? std::max(timeout, 30000) : 0;
++
++		IOUSBDevRequestTO request = {};
++		request.bmRequestType = type;
++		request.bRequest = req;
++		request.wValue = value;
++		request.wIndex = index;
++		request.pData = const_cast<u8 *>(data.data());
++		request.wLength = static_cast<UInt16>(data.size());
++		request.noDataTimeout = noDataTimeout;
++		request.completionTimeout = completionTimeout;
++		USB_CALL((*_dev)->DeviceRequestTO(_dev, &request));
++	}
+ 
+ 	InterfaceTokenPtr Device::ClaimInterface(const InterfacePtr &interface)
+ 	{ return interface->Claim(); }
+diff --git a/mtp/backend/darwin/usb/DeviceDescriptor.cpp b/mtp/backend/darwin/usb/DeviceDescriptor.cpp
+index b22da38..df62cc8 100644
+--- a/mtp/backend/darwin/usb/DeviceDescriptor.cpp
++++ b/mtp/backend/darwin/usb/DeviceDescriptor.cpp
+@@ -50,9 +50,9 @@ namespace mtp { namespace usb
+ 
+ 			IOObjectRelease(interface);
+ 
+-			IOUSBInterfaceInterface **usbInterface = NULL;
++			IOUSBInterfaceType **usbInterface = NULL;
+ 			USB_CALL((*plugInInterface)->QueryInterface(plugInInterface,
+-				CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID),
++				CFUUIDGetUUIDBytes(InterfaceInterfaceID),
+ 				(LPVOID *) &usbInterface));
+ 
+ 			(*plugInInterface)->Release(plugInInterface);
+diff --git a/mtp/backend/darwin/usb/DeviceDescriptor.h b/mtp/backend/darwin/usb/DeviceDescriptor.h
+index 64efe4c..8aab158 100644
+--- a/mtp/backend/darwin/usb/DeviceDescriptor.h
++++ b/mtp/backend/darwin/usb/DeviceDescriptor.h
+@@ -35,7 +35,7 @@ namespace mtp { namespace usb
+ 		//IOUSBDeviceType			**_dev;
+ 		IOUSBConfigurationDescriptorPtr	_conf;
+ 
+-		std::vector<IOUSBInterfaceInterface **> _interfaces;
++		std::vector<IOUSBInterfaceType **> _interfaces;
+ 
+ 	public:
+ 		Configuration(IOUSBDeviceType ** dev, IOUSBConfigurationDescriptorPtr conf);
+diff --git a/mtp/backend/darwin/usb/Interface.cpp b/mtp/backend/darwin/usb/Interface.cpp
+index c6024af..564a87d 100644
+--- a/mtp/backend/darwin/usb/Interface.cpp
++++ b/mtp/backend/darwin/usb/Interface.cpp
+@@ -24,7 +24,7 @@
+ namespace mtp { namespace usb
+ {
+ 
+-	Endpoint::Endpoint(IOUSBInterfaceInterface **interface, int idx): _interface(interface), _refIndex(idx)
++	Endpoint::Endpoint(IOUSBInterfaceType **interface, int idx): _interface(interface), _refIndex(idx)
+ 	{
+ 		UInt8		direction;
+ 		UInt8		number;
+@@ -59,7 +59,7 @@ namespace mtp { namespace usb
+ 		_maxPacketSize = maxPacketSize;
+ 	}
+ 
+-	Interface::Interface(DevicePtr device, ConfigurationPtr config, IOUSBInterfaceInterface **interface): _device(device), _config(config), _interface(interface) { }
++	Interface::Interface(DevicePtr device, ConfigurationPtr config, IOUSBInterfaceType **interface): _device(device), _config(config), _interface(interface) { }
+ 
+ 	Interface::~Interface()
+ 	{ }
+@@ -92,7 +92,7 @@ namespace mtp { namespace usb
+ 		return intfNumEndpoints;
+ 	}
+ 
+-	InterfaceToken::InterfaceToken(IOUSBInterfaceInterface **interface): _interface(interface)
++	InterfaceToken::InterfaceToken(IOUSBInterfaceType **interface): _interface(interface)
+ 	{
+ 		USB_CALL((*_interface)->USBInterfaceOpen(_interface));
+ 	}
+diff --git a/mtp/backend/darwin/usb/Interface.h b/mtp/backend/darwin/usb/Interface.h
+index 98eedd8..06b6606 100644
+--- a/mtp/backend/darwin/usb/Interface.h
++++ b/mtp/backend/darwin/usb/Interface.h
+@@ -28,7 +28,7 @@ namespace mtp { namespace usb
+ 	class Endpoint
+ 	{
+ 	private:
+-		IOUSBInterfaceInterface	**	_interface;
++		IOUSBInterfaceType	**		_interface;
+ 		int							_refIndex;
+ 		int							_address;
+ 		int							_maxPacketSize;
+@@ -36,9 +36,9 @@ namespace mtp { namespace usb
+ 		EndpointType				_type;
+ 
+ 	public:
+-		Endpoint(IOUSBInterfaceInterface **interface, int idx);
++		Endpoint(IOUSBInterfaceType **interface, int idx);
+ 
+-		IOUSBInterfaceInterface	** GetInterfaceHandle()
++		IOUSBInterfaceType	** GetInterfaceHandle()
+ 		{ return _interface; }
+ 
+ 		int GetRefIndex()
+@@ -65,10 +65,10 @@ namespace mtp { namespace usb
+ 
+ 	class InterfaceToken : public IToken
+ 	{
+-		IOUSBInterfaceInterface **_interface;
++		IOUSBInterfaceType **_interface;
+ 
+ 	public:
+-		InterfaceToken(IOUSBInterfaceInterface **interface);
++		InterfaceToken(IOUSBInterfaceType **interface);
+ 		~InterfaceToken();
+ 	};
+ 	DECLARE_PTR(InterfaceToken);
+@@ -77,13 +77,13 @@ namespace mtp { namespace usb
+ 	{
+ 		DevicePtr							_device;
+ 		ConfigurationPtr					_config;
+-		IOUSBInterfaceInterface **			_interface;
++		IOUSBInterfaceType **				_interface;
+ 
+ 	public:
+-		Interface(DevicePtr device, ConfigurationPtr config, IOUSBInterfaceInterface **interface);
++		Interface(DevicePtr device, ConfigurationPtr config, IOUSBInterfaceType **interface);
+ 		~Interface();
+ 
+-		IOUSBInterfaceInterface ** GetInterfaceHandle()
++		IOUSBInterfaceType ** GetInterfaceHandle()
+ 		{ return _interface; }
+ 
+ 		u8 GetClass() const;
+diff --git a/mtp/backend/darwin/usb/call.h b/mtp/backend/darwin/usb/call.h
+index d850b4d..d863a87 100644
+--- a/mtp/backend/darwin/usb/call.h
++++ b/mtp/backend/darwin/usb/call.h
+@@ -24,12 +24,16 @@
+ #include <usb/usb.h>
+ #include <mtp/usb/DeviceNotFoundException.h>
+ #include <mtp/usb/DeviceBusyException.h>
++#include <mtp/usb/TimeoutException.h>
+ 
+ #define USB_CALL(...) \
+ 	do { int _r_ = (__VA_ARGS__); \
+ 		switch(_r_) { \
+ 			case kIOReturnSuccess  : break; \
+-			case kIOReturnNoDevice : throw mtp::usb::DeviceNotFoundException(); \
++			case kIOReturnNoDevice : \
++			case kIOReturnNotResponding : throw mtp::usb::DeviceNotFoundException(); \
++			case kIOReturnTimeout : \
++			case kIOUSBTransactionTimeout : throw mtp::usb::TimeoutException("USB transfer timed out"); \
+ 			case kIOReturnExclusiveAccess: throw mtp::usb::DeviceBusyException(); \
+ 			default: throw mtp::usb::Exception(#__VA_ARGS__, _r_) ; \
+ 		} \
+diff --git a/mtp/backend/darwin/usb/usb.h b/mtp/backend/darwin/usb/usb.h
+index 9b3ceb9..8bee795 100644
+--- a/mtp/backend/darwin/usb/usb.h
++++ b/mtp/backend/darwin/usb/usb.h
+@@ -31,4 +31,18 @@ typedef IOUSBDeviceInterface500 IOUSBDeviceType;
+ typedef IOUSBDeviceInterface IOUSBDeviceType;
+ #define DeviceInterfaceID kIOUSBDeviceInterface
+ #endif
+-}}
+\ No newline at end of file
++
++#if defined (kIOUSBInterfaceInterfaceID500)
++typedef IOUSBInterfaceInterface500 IOUSBInterfaceType;
++#define InterfaceInterfaceID kIOUSBInterfaceInterfaceID500
++#elif defined (kIOUSBInterfaceInterfaceID190)
++typedef IOUSBInterfaceInterface190 IOUSBInterfaceType;
++#define InterfaceInterfaceID kIOUSBInterfaceInterfaceID190
++#elif defined (kIOUSBInterfaceInterfaceID182)
++typedef IOUSBInterfaceInterface182 IOUSBInterfaceType;
++#define InterfaceInterfaceID kIOUSBInterfaceInterfaceID182
++#else
++typedef IOUSBInterfaceInterface IOUSBInterfaceType;
++#define InterfaceInterfaceID kIOUSBInterfaceInterfaceID
++#endif
++}}

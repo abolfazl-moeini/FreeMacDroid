@@ -1,6 +1,6 @@
 cask "freemacdroid" do
-  version "0.1.0"
-  sha256 "0156b25bb5baeaa7cd30f7217fdac9fa92fcd3e2d90e24dc616bc8a3030c1d73"
+  version "0.2.0"
+  sha256 "1abc0ba4170d63110a8f60efe41dc7b3ba877c9bdbd5bcdbd8b18b2a238ff6fc"
 
   url "https://github.com/abolfazl-moeini/FreeMacDroid/releases/download/v#{version}/FreeMacDroid.dmg"
   name "FreeMacDroid"

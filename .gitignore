@@ -4,3 +4,5 @@ dist/
 aft/
 *.log
 /tmp/
+/bin/aft-mtp-mount
+/bin/aft-mtp-cli
