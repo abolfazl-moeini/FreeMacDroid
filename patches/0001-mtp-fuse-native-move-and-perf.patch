@@ -1,22 +1,8 @@
 diff --git a/fuse/fuse.cpp b/fuse/fuse.cpp
-index 4ecf340..8ba0180 100644
+index 4ecf340..9d32e72 100644
 --- a/fuse/fuse.cpp
 +++ b/fuse/fuse.cpp
-@@ -41,6 +41,13 @@
- 
- #include <fuse_lowlevel.h>
- 
-+#ifndef RENAME_NOREPLACE
-+#define RENAME_NOREPLACE (1 << 0)
-+#endif
-+#ifndef RENAME_EXCHANGE
-+#define RENAME_EXCHANGE (1 << 1)
-+#endif
-+
- namespace
- {
- 	using namespace mtp::fuse;
-@@ -54,6 +61,7 @@ namespace
+@@ -54,16 +54,28 @@ namespace
  		mtp::DevicePtr	_device;
  		mtp::SessionPtr	_session;
  		bool			_editObjectSupported;
@@ -24,7 +10,20 @@ index 4ecf340..8ba0180 100644
  		bool			_getObjectPropertyListSupported;
  		bool			_getPartialObjectSupported;
  		time_t			_connectTime;
-@@ -64,6 +72,7 @@ namespace
+ 		size_t			_partialObjectCacheSize;
+ 
+ 		static constexpr size_t DefaultPartialObjectCacheSize = 3; //just 3 object entries.
++#ifdef RENAME_NOREPLACE
++		static constexpr unsigned int RenameNoReplace = RENAME_NOREPLACE;
++#else
++		static constexpr unsigned int RenameNoReplace = (1u << 0);
++#endif
++#ifdef RENAME_EXCHANGE
++		static constexpr unsigned int RenameExchange = RENAME_EXCHANGE;
++#else
++		static constexpr unsigned int RenameExchange = (1u << 1);
++#endif
+ 
  		using ChildrenObjects = std::map<std::string, FuseId>;
  		using Files = std::map<FuseId, ChildrenObjects>;
  		Files			_files;
@@ -32,7 +31,7 @@ index 4ecf340..8ba0180 100644
  
  		typedef std::map<mtp::ObjectId, struct stat> ObjectAttrs;
  		ObjectAttrs		_objectAttrs;
-@@ -72,6 +81,18 @@ namespace
+@@ -72,6 +84,18 @@ namespace
  		typedef std::map<FuseId, ObjectEditSessionPtr> OpenedFiles;
  		OpenedFiles		_openedFiles;
  
@@ -51,7 +50,7 @@ index 4ecf340..8ba0180 100644
  		typedef std::map<FuseId, CharArray> DirectoryCache;
  		DirectoryCache	_directoryCache;
  
-@@ -82,6 +103,15 @@ namespace
+@@ -82,6 +106,15 @@ namespace
  		std::map<mtp::StorageId, std::string>		_storageToName;
  		std::map<std::string, mtp::StorageId>		_storageFromName;
  
@@ -67,7 +66,7 @@ index 4ecf340..8ba0180 100644
  		struct ObjectCacheEntry
  		{
  			mtp::ObjectId 	Id;
-@@ -131,12 +161,13 @@ namespace
+@@ -131,12 +164,13 @@ namespace
  			return FuseId(MtpStorageShift + std::distance(_storageIdList.begin(), i));
  		}
  
@@ -82,7 +81,7 @@ index 4ecf340..8ba0180 100644
  
  			struct stat &attr = _objectAttrs[id];
  			attr.st_uid = getuid();
-@@ -233,17 +264,19 @@ namespace
+@@ -233,17 +267,19 @@ namespace
  		{
  			if (inode == FuseId::Root)
  			{
@@ -111,7 +110,7 @@ index 4ecf340..8ba0180 100644
  				}
  				return cache;
  			}
-@@ -282,8 +315,12 @@ namespace
+@@ -282,8 +318,12 @@ namespace
  
  					//populate filenames
  					GetObjectPropertyList<std::string>(parent, objects, mtp::ObjectProperty::ObjectFilename,
@@ -126,7 +125,7 @@ index 4ecf340..8ba0180 100644
  
  					//format
  					GetObjectPropertyList<mtp::ObjectFormat>(parent, objects, mtp::ObjectProperty::ObjectFormat,
-@@ -328,7 +365,7 @@ namespace
+@@ -328,7 +368,7 @@ namespace
  			{
  				try
  				{
@@ -135,7 +134,7 @@ index 4ecf340..8ba0180 100644
  				} catch(const std::exception &ex)
  				{ }
  			}
-@@ -365,8 +402,10 @@ namespace
+@@ -365,8 +405,10 @@ namespace
  			{ //update cache:
  				auto i = _files.find(parentInode);
  				if (i != _files.end())
@@ -147,7 +146,7 @@ index 4ecf340..8ba0180 100644
  			}
  			return ToFuse(noi.ObjectId);
  		}
-@@ -397,19 +436,51 @@ namespace
+@@ -397,19 +439,51 @@ namespace
  			if (IsStorage(inode))
  				return FuseId::Root;
  
@@ -201,7 +200,7 @@ index 4ecf340..8ba0180 100644
  			entry.SetId(id);
  			return true;
  		}
-@@ -424,9 +495,16 @@ namespace
+@@ -424,9 +498,16 @@ namespace
  			mtp::scoped_mutex_lock l(_mutex);
  
  			_openedFiles.clear();
@@ -218,7 +217,7 @@ index 4ecf340..8ba0180 100644
  			_session.reset();
  			_device.reset();
  			_device = mtp::Device::FindFirst(_deviceFilter, _claimInterface, _resetDevice);
-@@ -434,13 +512,21 @@ namespace
+@@ -434,13 +515,21 @@ namespace
  				throw std::runtime_error("no MTP device found");
  
  			_session = _device->OpenSession(1);
@@ -242,7 +241,7 @@ index 4ecf340..8ba0180 100644
  			if (!_getPartialObjectSupported)
  				mtp::error("your device does not have GetPartialObject extension (beware, this will download the latest N objects you accessed and keep them in a small in-memory cache)");
  
-@@ -470,6 +556,7 @@ namespace
+@@ -470,6 +559,7 @@ namespace
  				_storageIdList.push_back(id);
  				_storageFromName[path] = id;
  				_storageToName[id] = path;
@@ -250,7 +249,7 @@ index 4ecf340..8ba0180 100644
  			}
  		}
  		std::string GetMountpoint()
-@@ -512,11 +599,19 @@ namespace
+@@ -512,11 +602,19 @@ namespace
  			if (it == _directoryCache.end())
  			{
  				const ChildrenObjects & cache = GetChildren(ino);
@@ -271,7 +270,7 @@ index 4ecf340..8ba0180 100644
  				dir.Add(data, "..", GetObjectAttr(GetParentObject(ino)));
  				for(auto entry : cache)
  				{
-@@ -537,6 +632,33 @@ namespace
+@@ -537,6 +635,33 @@ namespace
  				entry.ReplyError(ENOENT);
  		}
  
@@ -305,7 +304,7 @@ index 4ecf340..8ba0180 100644
  		mtp::Session::ObjectEditSessionPtr GetTransaction(FuseId inode)
  		{
  			mtp::Session::ObjectEditSessionPtr tr;
-@@ -599,8 +721,30 @@ namespace
+@@ -599,8 +724,30 @@ namespace
  						_objectCache.pop_back();
  						--size;
  					}
@@ -338,7 +337,7 @@ index 4ecf340..8ba0180 100644
  			}
  			mtp::debug("read ", data.size(), " bytes of data");
  			if (data.empty())
-@@ -620,20 +764,40 @@ namespace
+@@ -620,20 +767,40 @@ namespace
  		{
  			mtp::scoped_mutex_lock l(_mutex);
  
@@ -387,7 +386,7 @@ index 4ecf340..8ba0180 100644
  			FUSE_CALL(fuse_reply_write(req, size));
  		}
  
-@@ -649,30 +813,57 @@ namespace
+@@ -649,30 +816,57 @@ namespace
  		void Open(fuse_req_t req, FuseId ino, struct fuse_file_info *fi)
  		{
  			mtp::scoped_mutex_lock l(_mutex);
@@ -452,7 +451,7 @@ index 4ecf340..8ba0180 100644
  		void Release(fuse_req_t req, FuseId ino, struct fuse_file_info *fi)
  		{
  			mtp::scoped_mutex_lock l(_mutex);
-@@ -688,11 +879,20 @@ namespace
+@@ -688,11 +882,20 @@ namespace
  			{
  				if (to_set & FUSE_SET_ATTR_SIZE)
  				{
@@ -474,7 +473,7 @@ index 4ecf340..8ba0180 100644
  				}
  				entry.ReplyAttr();
  			}
-@@ -704,9 +904,20 @@ namespace
+@@ -704,9 +907,20 @@ namespace
  		{
  			mtp::debug("   unlinking inode ", inode.Inode);
  			mtp::ObjectId id = FromFuse(inode);
@@ -496,7 +495,7 @@ index 4ecf340..8ba0180 100644
  		}
  
  		void Unlink(fuse_req_t req, FuseId parent, const char *name)
-@@ -743,43 +954,218 @@ namespace
+@@ -743,43 +957,218 @@ namespace
  
  		void Rename(fuse_req_t req, FuseId parent, const char *name, FuseId newparent, const char *newName, unsigned int flags)
  		{
@@ -505,7 +504,7 @@ index 4ecf340..8ba0180 100644
 -				//return cross-device link, so user space should re-create file and copy it
 -				FUSE_CALL(fuse_reply_err(req, EXDEV));
 +			mtp::debug("   Rename flags: 0x", mtp::hex(flags, 8));
-+			if (flags & RENAME_EXCHANGE)
++			if (flags & RenameExchange)
 +			{
 +				FUSE_CALL(fuse_reply_err(req, EINVAL));
  				return;
@@ -578,23 +577,23 @@ index 4ecf340..8ba0180 100644
 +				_readAheadInode = 0;
 +			}
 +			_objectCache.remove_if([id](const ObjectCacheEntry &e) { return e.Id == id; });
- 
--			auto old = children.find(newName);
--			if (old != children.end())
++
 +			ChildrenObjects &destChildren = (parent == newparent) ? srcChildren : GetChildren(newparent);
 +			if (parent != newparent && std::string(name) != std::string(newName)
 +				&& destChildren.find(name) != destChildren.end()
 +				&& srcChildren.find(newName) != srcChildren.end())
- 			{
++			{
 +				mtp::debug("Cross-directory MoveObject name collision in both src and dest, falling back to EXDEV");
 +				FUSE_CALL(fuse_reply_err(req, EXDEV));
 +				return;
 +			}
-+
+ 
+-			auto old = children.find(newName);
+-			if (old != children.end())
 +			auto old = destChildren.find(newName);
 +			if (old != destChildren.end())
-+			{
-+				if (flags & RENAME_NOREPLACE)
+ 			{
++				if (flags & RenameNoReplace)
 +				{
 +					FUSE_CALL(fuse_reply_err(req, EEXIST));
 +					return;
@@ -731,7 +730,7 @@ index 4ecf340..8ba0180 100644
  		void StatFS(fuse_req_t req, FuseId ino)
  		{
  			mtp::scoped_mutex_lock l(_mutex);
-@@ -791,22 +1177,20 @@ namespace
+@@ -791,22 +1180,20 @@ namespace
  			{
  				for(auto storageId : _storageIdList)
  				{
@@ -763,7 +762,7 @@ index 4ecf340..8ba0180 100644
  			}
  
  			stat.f_frsize = stat.f_bsize = 1024 * 1024;
-@@ -823,8 +1207,14 @@ namespace
+@@ -823,8 +1210,14 @@ namespace
  		try { return __VA_ARGS__ ; } \
  		catch (const mtp::usb::DeviceNotFoundException &) \
  		{ \
@@ -780,7 +779,7 @@ index 4ecf340..8ba0180 100644
  		} \
  		catch (const std::exception &ex) \
  		{ mtp::error(#__VA_ARGS__ " failed: ", ex.what()); fuse_reply_err(req, EIO); } \
-@@ -877,6 +1267,9 @@ namespace
+@@ -877,6 +1270,9 @@ namespace
  	void Release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
  	{ mtp::debug("   Release ", ino); WRAP_EX(g_wrapper->Release(req, FuseId(ino), fi)); }
  
@@ -790,7 +789,7 @@ index 4ecf340..8ba0180 100644
  	void MakeDir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode)
  	{ mtp::debug("   MakeDir ", parent, " ", name, " 0x", mtp::hex(mode, 8)); WRAP_EX(g_wrapper->MakeDir(req, FuseId(parent), name, mode)); }
  
-@@ -966,6 +1359,7 @@ int main(int argc, char **argv)
+@@ -966,6 +1362,7 @@ int main(int argc, char **argv)
  	ops.mkdir		= &MakeDir;
  	ops.rename		= &Rename;
  	ops.release		= &Release;
